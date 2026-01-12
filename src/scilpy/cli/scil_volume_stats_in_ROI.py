@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Compute the statistics (mean, std) of scalar maps, which can represent
-diffusion metrics, in ROIs. Prints the results.
+diffusion metrics, in ROIs. Saves results to a CSV file.
 
 The ROIs can either be binary masks, or weighting masks. If the ROIs are
  weighting masks, they should either contain floats between 0 and 1 or should be
@@ -11,18 +11,19 @@ normalized with --normalize_weights. IMPORTANT: if the ROIs contain weights
 """
 
 import argparse
+import csv
 import glob
-import json
 import logging
 import os
 
 import nibabel as nib
 import numpy as np
+import pandas as pd
 
 from scilpy.io.utils import (add_overwrite_arg,
-                             add_json_args,
                              add_verbose_arg,
                              assert_inputs_exist,
+                             assert_outputs_exist,
                              assert_headers_compatible)
 from scilpy.utils.filenames import split_name_with_nii
 from scilpy.utils.metrics_tools import weighted_mean_std
@@ -37,10 +38,11 @@ def _build_arg_parser():
     p.add_argument('in_rois', nargs='+',
                    help='ROIs volume filenames.\nCan be binary masks or '
                         'weighted masks.')
+    p.add_argument('out_csv',
+                   help='Output CSV filename.')
 
     p.add_argument('--keep_unique_roi_name', action='store_true',
-                     help='If set, will keep the same JSON structure even if only '
-                            'one ROI is provided as input.')
+                     help='Deprecated: kept for backward compatibility.')
 
     g = p.add_argument_group('Metrics input options')
     gg = g.add_mutually_exclusive_group(required=True)
@@ -60,7 +62,6 @@ def _build_arg_parser():
                    help='If set, the weights will be normalized to the [0,1] '
                         'range.')
 
-    add_json_args(p)
     add_verbose_arg(p)
     add_overwrite_arg(p)
 
@@ -73,6 +74,7 @@ def main():
     logging.getLogger().setLevel(logging.getLevelName(args.verbose))
 
     # Verifications
+    assert_outputs_exist(parser, args, args.out_csv)
 
     # Get input list. Either all files in dir or given list.
     if args.metrics_dir:
@@ -143,11 +145,20 @@ def main():
                     'Metric {} is not a 3D image ({}D shape).'
                     .format(f, len(metric_img.shape)))
 
-    if len(args.in_rois) == 1 and not args.keep_unique_roi_name:
-        json_stats = json_stats[roi_name]
-
-    # Print results
-    print(json.dumps(json_stats, indent=args.indent, sort_keys=args.sort_keys))
+    # Convert to DataFrame and save as CSV
+    rows = []
+    for roi_name, metrics in json_stats.items():
+        for metric_name, stats in metrics.items():
+            rows.append({
+                'roi': roi_name,
+                'metric': metric_name,
+                'mean': stats['mean'],
+                'std': stats['std']
+            })
+    
+    df = pd.DataFrame(rows)
+    df.to_csv(args.out_csv, index=False)
+    logging.info(f"Results saved to {args.out_csv}")
 
 
 if __name__ == "__main__":
