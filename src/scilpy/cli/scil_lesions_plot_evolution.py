@@ -11,8 +11,8 @@ pre-lesion labels.
 The script will:
 1. Count voxels for each lesion ID (positive and negative) in each session
 2. Plot volume evolution over time for each lesion
-3. Distinguish between pre-lesion (negative IDs), active lesion (positive IDs),
-   and confluent lesions (merged from multiple sources)
+3. Distinguish between pre-lesion (negative IDs), baseline lesions (present in first session),
+   new lesions (appearing later), and confluent lesions (merged from multiple sources)
 4. Optionally detect confluent lesions using backwards-mapping
 
 Confluent Lesions:
@@ -97,7 +97,7 @@ def _build_arg_parser():
                    choices=['nipy_spectral', 'jet', 'turbo', 'tab20', 'hsv', 'rainbow'],
                    help='Colormap for lesion colors [%(default)s].')
     p.add_argument('--separate_pre_lesions', action='store_true',
-                   help='Create separate plots for pre-lesions and active lesions.')
+                   help='Create separate plots for pre-lesions and baseline/new lesions.')
     p.add_argument('--growth_threshold', type=float, default=3.0,
                    help='Volume change threshold (in mm³) to consider a lesion '
                         'as changing (growing or shrinking) compared to its baseline. '
@@ -137,12 +137,18 @@ def count_lesion_volumes(images, voxel_volume=1.0, filenames=None, confluent_les
     -------
     df : pandas.DataFrame
         DataFrame with columns: Session, Lesion_ID, Volume, Status
-        Status is 'Pre-lesion' for negative IDs, 'Confluent' for merged lesions, 'Active' for normal lesions.
+        Status is 'Pre-lesion' for negative IDs, 'Confluent' for merged lesions, 'Baseline' for lesions present in first session, 'New' for lesions appearing later.
     """
     if confluent_lesions is None:
         confluent_lesions = {}
     
     data_records = []
+    
+    # First pass: identify which lesions are present in the first session (baseline lesions)
+    first_session_data = np.asanyarray(images[0].dataobj)
+    baseline_lesions = set(np.unique(first_session_data))
+    baseline_lesions.discard(0)  # Remove background
+    baseline_lesions = {abs(int(label)) for label in baseline_lesions}  # Use absolute IDs
     
     for session_idx, img in enumerate(images):
         data = np.asanyarray(img.dataobj)
@@ -171,7 +177,7 @@ def count_lesion_volumes(images, voxel_volume=1.0, filenames=None, confluent_les
             voxel_count = np.sum(data == label_id)
             volume = voxel_count * voxel_volume
             
-            # Determine status based on sign and confluent detection
+            # Determine status based on sign, confluent detection, and first appearance
             if label_id < 0:
                 status = 'Pre-lesion'
                 abs_id = abs(label_id)
@@ -180,8 +186,12 @@ def count_lesion_volumes(images, voxel_volume=1.0, filenames=None, confluent_les
                 # Check if this is a confluent lesion
                 if abs_id in confluent_lesions:
                     status = 'Confluent'
+                # Check if lesion was present in baseline (first session)
+                elif abs_id in baseline_lesions:
+                    status = 'Baseline'
                 else:
-                    status = 'Active'
+                    # Lesion appears after baseline, so it's new
+                    status = 'New'
             
             data_records.append({
                 'Subject': subject_id,
@@ -282,7 +292,7 @@ def plot_lesion_evolution(df, session_names, width, height,
     height : int
         Plot height in pixels.
     separate_pre_lesions : bool
-        If True, create separate subplots for pre-lesions and active lesions.
+        If True, create separate subplots for pre-lesions and baseline/new lesions.
     volume_unit : str
         Unit for volume ('voxels' or 'mm³').
     growth_threshold : float
@@ -301,10 +311,10 @@ def plot_lesion_evolution(df, session_names, width, height,
         The created figure.
     """
     
-    # Identify growing/shrinking lesions (active and confluent lesions with |change| > threshold)
+    # Identify growing/shrinking lesions (all lesions with |change| > threshold)
     changing_lesions = set()
-    for abs_id in df[df['Status'].isin(['Active', 'Confluent'])]['Absolute_ID'].unique():
-        lesion_data = df[(df['Absolute_ID'] == abs_id) & (df['Status'].isin(['Active', 'Confluent']))].sort_values('Session')
+    for abs_id in df[df['Status'].isin(['Baseline', 'New', 'Confluent'])]['Absolute_ID'].unique():
+        lesion_data = df[(df['Absolute_ID'] == abs_id) & (df['Status'].isin(['Baseline', 'New', 'Confluent']))].sort_values('Session')
         if len(lesion_data) > 1:
             baseline_volume = lesion_data.iloc[0]['Volume']
             # Check for maximum absolute change (can be positive or negative)
@@ -331,8 +341,8 @@ def plot_lesion_evolution(df, session_names, width, height,
         horizontal_spacing=0.15, vertical_spacing=0.14
     )
     
-    # Subplot 1: Active and Confluent lesions (all)
-    df_active = df[df['Status'].isin(['Active', 'Confluent'])]
+    # Subplot 1: All lesions (Baseline, New, and Confluent)
+    df_active = df[df['Status'].isin(['Baseline', 'New', 'Confluent'])]
     if not df_active.empty:
         for lesion_id in sorted(df_active['Absolute_ID'].unique()):
             lesion_data = df_active[df_active['Absolute_ID'] == lesion_id].sort_values('Session')
@@ -438,13 +448,13 @@ def plot_lesion_evolution(df, session_names, width, height,
             row=1, col=2
         )
     
-    # Subplot 3: New lesions evolution (pre-lesions with their active phases)
+    # Subplot 3: New lesions evolution (pre-lesions with their baseline/new phases)
     lesions_with_pre = df[df['Status'] == 'Pre-lesion']['Absolute_ID'].unique()
     if len(lesions_with_pre) > 0:
         for abs_id in sorted(lesions_with_pre):
             lesion_df = df[df['Absolute_ID'] == abs_id].sort_values('Session')
             
-            # Combine pre-lesion and active data to create continuous line
+            # Combine pre-lesion and baseline/new data to create continuous line
             all_sessions = []
             all_volumes = []
             
@@ -454,8 +464,8 @@ def plot_lesion_evolution(df, session_names, width, height,
                 all_sessions.extend(pre_data['Session'].tolist())
                 all_volumes.extend(pre_data['Volume'].tolist())
             
-            # Get active data
-            active_data = lesion_df[lesion_df['Status'] == 'Active']
+            # Get baseline/new data
+            active_data = lesion_df[lesion_df['Status'].isin(['Baseline', 'New'])]
             if not active_data.empty:
                 all_sessions.extend(active_data['Session'].tolist())
                 all_volumes.extend(active_data['Volume'].tolist())
@@ -575,7 +585,7 @@ def plot_trajectory_classification(df, session_names, width, height,
     mixed = set()
     stable = set()
     
-    df_active = df[df['Status'].isin(['Active', 'Confluent'])]
+    df_active = df[df['Status'].isin(['Baseline', 'New', 'Confluent'])]
     
     for abs_id in df_active['Absolute_ID'].unique():
         lesion_data = df_active[df_active['Absolute_ID'] == abs_id].sort_values('Session')
@@ -911,7 +921,7 @@ def main():
         subject_id = lesion_data.iloc[0]['Subject']
         
         # For active and confluent lesions, calculate delta based on method
-        active_data = lesion_data[lesion_data['Status'].isin(['Active', 'Confluent'])]
+        active_data = lesion_data[lesion_data['Status'].isin(['Baseline', 'New', 'Confluent'])]
         if not active_data.empty:
             if args.delta_method == 'baseline':
                 # Delta compared to first active/confluent appearance (baseline)
@@ -934,14 +944,14 @@ def main():
         
         # Add missing sessions with NaN values
         for missing_session in missing_sessions:
-            # Determine status: if lesion has appeared (active), missing means it disappeared
+            # Determine status: if lesion has appeared, missing means it disappeared
             # If it hasn't appeared yet, it's just not present
             if missing_session > lesion_data['Session'].max():
-                # After last appearance - disappeared
-                status = 'Active'
+                # After last appearance - disappeared, use the lesion's original status
+                status = active_data.iloc[0]['Status'] if not active_data.empty else 'New'
             elif not active_data.empty and missing_session >= active_data.iloc[0]['Session']:
-                # After first active appearance - disappeared
-                status = 'Active'
+                # After first appearance - disappeared, use the lesion's original status
+                status = active_data.iloc[0]['Status']
             else:
                 # Before any appearance
                 continue  # Don't add entries before lesion appears
@@ -982,7 +992,7 @@ def main():
     
     # Classify lesions by trajectory group
     trajectory_dict = {}
-    df_active = df[df['Status'].isin(['Active', 'Confluent'])]
+    df_active = df[df['Status'].isin(['Baseline', 'New', 'Confluent'])]
     
     for abs_id in df['Absolute_ID'].unique():
         lesion_data = df_active[df_active['Absolute_ID'] == abs_id].sort_values('Session')
@@ -1140,7 +1150,7 @@ def main():
     print(f"\nLesions with pre-lesion phase: "
           f"{df[df['Status'] == 'Pre-lesion']['Absolute_ID'].nunique()}")
     print(f"Lesions with active phase: "
-          f"{df[df['Status'] == 'Active']['Absolute_ID'].nunique()}")
+          f"{df[df['Status'].isin(['Baseline', 'New'])]['Absolute_ID'].nunique()}")
     
     # Print confluent lesions if detected
     if args.detect_confluent:
@@ -1152,8 +1162,8 @@ def main():
     
     # Count growing lesions (exclude confluent for cleaner statistics)
     changing_lesions = set()
-    for abs_id in df[df['Status'].isin(['Active', 'Confluent'])]['Absolute_ID'].unique():
-        lesion_data = df[(df['Absolute_ID'] == abs_id) & (df['Status'].isin(['Active', 'Confluent']))].sort_values('Session')
+    for abs_id in df[df['Status'].isin(['Baseline', 'New', 'Confluent'])]['Absolute_ID'].unique():
+        lesion_data = df[(df['Absolute_ID'] == abs_id) & (df['Status'].isin(['Baseline', 'New', 'Confluent']))].sort_values('Session')
         if len(lesion_data) > 1:
             baseline_volume = lesion_data.iloc[0]['Volume']
             max_abs_change = (lesion_data['Volume'] - baseline_volume).abs().max()
@@ -1166,7 +1176,7 @@ def main():
     
     # Volume statistics
     print(f"\n=== Volume Statistics ({volume_unit}) ===")
-    status_list = ['Pre-lesion', 'Active']
+    status_list = ['Pre-lesion', 'Baseline', 'New']
     if args.detect_confluent and not df[df['Status'] == 'Confluent'].empty:
         status_list.append('Confluent')
     
