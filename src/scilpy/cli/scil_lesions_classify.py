@@ -111,6 +111,9 @@ def _build_arg_parser():
     p.add_argument('--confluent_gm_threshold', type=float, default=0.05,
                    help='Minimum grey matter overlap percentage for '
                         'confluent classification [%(default)s].')
+    p.add_argument('--add_sid', type=str, metavar='SID',
+                   help='Add a subject ID column to the output CSV with '
+                        'the specified value.')
     
     add_verbose_arg(p)
     add_overwrite_arg(p)
@@ -214,11 +217,9 @@ def main():
                                        args.in_gm_mask, args.in_csf_mask])
     
     # Load images
-    logging.info("Loading lesion labels...")
     lesion_img = nib.load(args.in_lesions)
     lesion_data = get_data_as_labels(lesion_img)
     
-    logging.info("Loading tissue masks...")
     wm_img = nib.load(args.in_wm_mask)
     wm_mask = get_data_as_mask(wm_img)
     
@@ -266,6 +267,11 @@ def main():
             'classification_code': classification,
             **overlap_stats
         }
+        
+        # Add subject ID if provided
+        if args.add_sid:
+            result['subject_id'] = args.add_sid
+        
         results.append(result)
         
         logging.info(f"Lesion {lesion_id}: {CLASS_NAMES[classification]}")
@@ -281,10 +287,16 @@ def main():
     df = pd.DataFrame(results)
     
     # Reorder columns for better readability
-    columns_order = ['lesion_id', 'classification', 'classification_code',
-                     'lesion_volume_voxels', 'wm_overlap_voxels',
-                     'gm_overlap_voxels', 'csf_overlap_voxels',
-                     'wm_percentage', 'gm_percentage', 'csf_percentage']
+    if args.add_sid:
+        columns_order = ['subject_id', 'lesion_id', 'classification', 'classification_code',
+                         'lesion_volume_voxels', 'wm_overlap_voxels',
+                         'gm_overlap_voxels', 'csf_overlap_voxels',
+                         'wm_percentage', 'gm_percentage', 'csf_percentage']
+    else:
+        columns_order = ['lesion_id', 'classification', 'classification_code',
+                         'lesion_volume_voxels', 'wm_overlap_voxels',
+                         'gm_overlap_voxels', 'csf_overlap_voxels',
+                         'wm_percentage', 'gm_percentage', 'csf_percentage']
     df = df[columns_order]
     
     df.to_csv(args.out_csv, index=False, float_format='%.2f')
@@ -298,8 +310,7 @@ def main():
         percentage = (count / len(df)) * 100 if len(df) > 0 else 0
         logging.info(f"{class_name}: {count} lesions ({percentage:.1f}%)")
     logging.info("="*60)
-    
-    logging.info("Classification complete!")
+
 
 
 if __name__ == "__main__":
