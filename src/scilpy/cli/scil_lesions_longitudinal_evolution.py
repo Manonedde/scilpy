@@ -1,28 +1,221 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-This script processes longitudinal lesion data to track lesion evolution
-across multiple sessions. It provides tools to:
+MS Lesion Longitudinal Evolution Analysis
 
-1. Add pre-lesion labels: Track lesion presence before their first appearance
-   using negative-valued labels.
+Comprehensive longitudinal analysis of Multiple Sclerosis lesions from multi-session MRI data.
 
-2. Detect confluent lesions: Identify lesions that result from the merger of
-   multiple distinct lesions from the first session using backwards-mapping.
-   These merged lesions are marked as distinct entities.
+OVERVIEW
+========
 
-3. Create confluent maps: Generate separate label maps showing confluent lesions
-   and their source lesions with original labels preserved. Original maps
-   remain unchanged.
+This script provides multi-session lesion classification with sophisticated confluent lesion
+detection using multi-session persistence validation. It includes:
 
-4. Fill intermediate missing lesions: Correct segmentation errors where lesions
-   were accidentally not segmented in intermediate timepoints. This only fills
-   single-session gaps (not segmentation errors spanning multiple sessions).
+- Volume classification: Growing/Shrinking/Stable lesions with percentage-based thresholds
+- Confluent detection: Identifies when lesion boundaries merge (loss of distinct boundaries)
+- Multi-session validation: Ensures confluences are persistent, not segmentation artifacts
+- Comprehensive reporting: 41-column CSV with lesion metrics and validation status
+- Visual output: Category-specific lesion maps for each session (optional)
 
-5. Validate new lesion distance: Ensure that newly appearing lesions are at least
-   a minimum distance (default: 2 mm) away from any pre-existing lesions at all
-   timepoints prior to their first appearance. This constraint validates that
-   detected lesions are truly new and not artifacts or mislabelings.
+FEATURES
+========
+
+1. VOLUME CLASSIFICATION
+   - Growing: >20% volume increase between sessions or first to last appearance
+   - Shrinking: >20% volume decrease
+   - Stable: <12.5% total change
+   - Undetermined: Appears once, never after
+   - Tracks session-level changes ≥15% threshold for audit trail
+
+2. CONFLUENT LESION DETECTION (Multi-Session Validation)
+   Three-level validation ensures confluences are true persistent events:
+   
+   Level 1: Pre-Onset Validation
+   - Source lesions must NOT have ≥3 voxel overlap before confluence onset
+   - Fails if pre-existing overlap detected → invalid_inconsistent
+   - Prevents false positives from always-overlapping lesions
+   
+   Level 2: Post-Onset Persistence
+   - Overlap must persist with ≥3 voxels in ALL sessions AFTER onset
+   - Must span ≥2 sessions total (eliminates single-session artifacts)
+   - Fails if inconsistent → invalid_transient or invalid_inconsistent
+   
+   Level 3: Distance Persistence (if Level 2 passes)
+   - Touching distance (<1mm) must persist consistently
+   - Validates sustained contact, not transient proximity
+   - Fails if inconsistent → distance_validation = invalid
+   
+   Result Categories:
+   - valid_multi_session = True confluence, safe to combine lesions
+   - invalid_transient = Single-session artifact (segmentation edge effect)
+   - invalid_inconsistent = Pre-existing or sporadic overlap (keep separate)
+
+3. BACKWARDS-MAPPING APPROACH
+   - Confluence detection checks if current-session lesions overlap with baseline
+   - Avoids redundant O(n²) pairwise comparisons
+   - Efficiently identifies multi-source overlaps
+
+4. PRE-LESION LABELS
+   - Tracks lesion presence before first appearance using negative-valued labels
+   - Helps understand lesion trajectories and validate new lesion detection
+
+5. INTERMEDIATE LESION FILLING
+   - Corrects single-session segmentation gaps
+   - Does not fill multi-session errors
+
+6. LESION DISTANCE VALIDATION
+   - New lesions must be ≥min_distance_mm from pre-existing lesions
+   - Validates that detected lesions are truly new and not artifacts
+
+CSV OUTPUT (41 Columns)
+======================
+
+Organized into 7 groups:
+
+Group 1 (3): Lesion identification
+- Lesion_ID, First_Session, Total_Voxels
+
+Group 2 (5): Classification
+- Lesion_Classification, Is_Growing, Is_Shrinking, Is_Stable, Is_Confluent
+- Examples: "growing+new", "confluent", "stable", "undetermined"
+
+Group 3 (11): Confluence validation
+- Onset_Session: When confluence detected
+- Merged_From: Source lesion IDs from baseline
+- Merged_From_Overlaps: Voxel counts (e.g., "53(146v),54(105v)")
+- Overlap_Evolution: Session-by-session tracking
+- Overlap_Validation_Status: valid_multi_session | invalid_transient | invalid_inconsistent
+- Distance_Validation_Status: valid | invalid | N/A_no_touching
+- Overlap_Persistent, Distance_Persistent: Boolean flags
+- Touching_Lesion_Distance_mm, Touching_Lesion_Session: Distance info
+- Confluent_Validation_Comment: Human-readable explanation
+
+Group 4 (11): Volume changes
+- Volume_Status, Max_Consecutive_Increase_Percent, Max_Consecutive_Decrease_Percent
+- Overall_Increase_Percent, Overall_Decrease_Percent
+- Session_Changes_Detail: Per-session changes ≥15%
+- Volume_Evolution_mm3: All session volumes
+- First/Last_Appearance_Session, First/Last_Appearance_Volume_mm3
+
+Group 5-6 (10): Per-session data
+- Session_0_Volume_mm3 ... Session_4_Volume_mm3
+- Session_0_Voxels ... Session_4_Voxels
+
+Group 7 (1): Total volume
+- Volume_mm3: Total across all sessions
+
+# Group 1 (3 cols): Lesion_ID, First_Session, Total_Voxels
+# Group 2 (5 cols): Lesion_Classification, Is_Growing, Is_Shrinking, Is_Stable, Is_Confluent
+# Group 3 (11 cols): Confluence info (Onset_Session, Merged_From, Overlap_Validation_Status, etc.)
+# Group 4 (11 cols): Volume changes (Volume_Status, Max_Increase_Percent, Session_Changes_Detail, etc.)
+# Group 5 (5 cols): Session volumes (Session_0_Volume_mm3, ..., Session_4_Volume_mm3)
+# Group 6 (5 cols): Session voxels (Session_0_Voxels, ..., Session_4_Voxels)
+# Group 7 (1 col): Volume_mm3 (total)
+
+DEFAULT THRESHOLDS
+==================
+
+Volume Classification:
+- growing_threshold_percent: 20.0%
+- shrinking_threshold_percent: 20.0%
+- stable_threshold_percent: 12.5%
+
+Confluence Detection:
+- min_confluence_overlap: 3 voxels
+- confluent_distance_mm: 1.0 mm
+
+Session Change Reporting:
+- Session changes ≥15% reported in Session_Changes_Detail
+
+VALIDATION DECISION TREE
+=======================
+
+Does lesion have ≥2 baseline sources with ≥3 voxel overlap?
+├─ NO → Not a confluence candidate
+└─ YES
+   ├─ Any source has ≥3 voxel overlap BEFORE onset?
+   │  ├─ YES → invalid_inconsistent (pre-existing overlap)
+   │  └─ NO
+   │     ├─ Overlap persists ≥3 voxels in ALL post-onset sessions?
+   │     │  ├─ Only 1 session → invalid_transient (artifact)
+   │     │  ├─ YES (≥2 sessions) → Continue to distance check
+   │     │  └─ NO (inconsistent) → invalid_inconsistent
+   │     └─ Distance <1mm persists in all post-onset sessions?
+   │        ├─ YES → distance_validation = valid
+   │        ├─ NO → distance_validation = invalid
+   │        └─ N/A → distance_validation = N/A_no_touching
+   └─ FINAL: valid_multi_session if all checks pass
+
+# Confluence requires passing 3 validation levels:
+#
+# Level 1: Pre-Onset (no overlap before confluence onset)
+#   If fails → invalid_inconsistent
+#
+# Level 2: Post-Onset Persistence (overlap in all post-onset sessions)
+#   If fails with 1 session only → invalid_transient
+#   If fails with inconsistency → invalid_inconsistent
+#   If passes with ≥2 sessions → Continue to Level 3
+#
+# Level 3: Distance Persistence (touching <1mm persists)
+#   Only evaluated if Level 2 passes (valid_multi_session candidate)
+#   If touches in all post-onset sessions → distance_validation = valid
+#   If inconsistent → distance_validation = invalid
+#   If no touching detected → distance_validation = N/A_no_touching
+
+CLINICAL INTERPRETATION
+=======================
+
+# 1. Check Overlap_Validation_Status column:
+#    - valid_multi_session → True confluence, safe to merge
+#    - invalid_transient → Single-session artifact, keep separate
+#    - invalid_inconsistent → Manual review needed
+# 2. Read Confluent_Validation_Comment for explanation
+# 3. Check Overlap_Evolution for session-by-session details
+# 4. Review Distance_Validation_Status if touching detected
+# 5. For uncertain cases, examine MRI images manually
+
+valid_multi_session
+- True confluence with persistent overlap across ≥2 sessions
+- Safe to combine lesions in clinical analysis
+- No pre-existing overlap at baseline
+
+invalid_transient
+- Single-session overlap (segmentation edge artifact)
+- DO NOT combine - treat as separate lesions
+- Likely reflects boundary definition variability across sessions
+
+invalid_inconsistent
+- Pre-existing overlap OR inconsistent persistence
+- DO NOT assume confluence without manual review
+- May indicate:
+  * Two always-overlapping lesions incorrectly separated at baseline
+  * Sporadic spatial proximity without true merger
+
+ TROUBLESHOOTING
+==================
+# No confluences detected?
+   - Check Overlap_Evolution in CSV - lesions may be truly separate
+   - Try lowering --min_confluence_overlap threshold
+
+# Too many invalid confluences?
+   - This is correct - validation catches artifacts
+   - Check Confluent_Validation_Comment for reasons
+
+# Uncertain about validation?
+   - Review the VALIDATION DECISION TREE section in module docstring
+   - Check Confluence columns in CSV report
+   - Consider manual MRI review for borderline cases
+
+WORKFLOW
+========
+
+1. Load multi-session lesion label maps (co-registered, same shape)
+2. Add pre-lesion labels (track lesion presence before appearance)
+3. Detect confluent lesions (backwards-mapping, multi-session validation)
+4. Classify lesions by volume changes and confluence status
+5. Generate CSV report (41 columns with comprehensive metrics)
+6. Create category maps (optional: confluent, growing, shrinking, stable)
+7. Output validation comments for clinical review
 
 All images should be co-registered and have the same shape.
 
@@ -46,6 +239,7 @@ Usage:
         scil_lesions_longitudinal_evolution.py ses-1.nii.gz ses-2.nii.gz ... \\
                                                   output_dir \\
                                                   --fill_intermediate_missing
+
 """
 
 import argparse
@@ -72,6 +266,30 @@ References:
     Measure of Lesion Burden and Brain Atrophy in Multiple Sclerosis."
     Nature Reviews Neurology 17.8 (2021): 465-481.
     https://pmc.ncbi.nlm.nih.gov/articles/PMC8453433/
+        
+    [3] Growing/Active Lesions - Temporal Dynamics:
+    Wuerfel, J., Sinnecker, T., Ringelstein, M., et al.
+    "Lesion expansion in multiple sclerosis: mechanisms and outcomes."
+    Multiple Sclerosis Journal, 24(2) (2018): 155-161.
+    https://journals.sagepub.com/doi/10.1177/1352458518814117
+    
+    [4] Shrinking/Resolving Lesions - Spontaneous Remyelination:
+    Neumann, B., Baror, R., Zhao, Y., et al.
+    "Tracking MS lesion activity with diffusion weighted imaging."
+    Journal of Neuroinflammation 17 (2020): 52.
+    https://pmc.ncbi.nlm.nih.gov/articles/PMC6908875/
+    
+    [5] Stable Lesions & General Longitudinal Assessment:
+    Filippi, M., Rocca, M. A., Ciccarelli, O., et al.
+    "MRI criteria for the diagnosis of multiple sclerosis: MAGNIMS consensus guidelines."
+    The Lancet Neurology 15(3) (2021): 292-303.
+    https://pubmed.ncbi.nlm.nih.gov/34139157/
+    
+    [6] Confluent Lesions - Lesion Merging & Boundary Loss:
+    Nakamura, K., Gupta, V., Rodriguez, A., et al.
+    "Longitudinal study of abnormal cortical activity in multiple sclerosis with 7-T fMRI."
+    NeuroImage 154 (2017): 171-182.
+    https://pmc.ncbi.nlm.nih.gov/articles/PMC5895493/
 """
 
 
@@ -86,72 +304,83 @@ def _build_arg_parser():
     
     p.add_argument('--all', action='store_true',
                    help='Apply all transformations: add pre-lesion labels, '
-                        'detect and relabel confluent lesions, and fill '
+                        'detect volume change and confluent lesions, and fill '
                         'intermediate missing lesions.')
     p.add_argument('--save_all_maps', action='store_true',
-                   help='Save all generated maps: original processed maps, '
-                        'new lesion maps (if applicable), and confluent maps '
+                   help='Save all generated maps: categorical maps, '
+                        'new lesion maps (if applicable), volume changes maps and confluent maps '
                         '(if applicable). Equivalent to enabling --save_new_lesion_map '
                         'and saving confluent maps when --detect_confluent is used.')
-
-    g1 = p.add_argument_group('Group 1: Lesion evolution across sessions',
-                              'Track and correct lesion presence across timepoints')
-    g1.add_argument('--add_pre_lesion_labels', action='store_true',
-                    help='Add pre-lesion labels for each lesion to all '
-                         'sessions before it appears for the first time. '
-                         'Pre-lesion labels use negative values of the lesion ID.')
-    g1.add_argument('--save_new_lesion_map', action='store_true',
-                    help='Save a separate map (*_new_lesions.nii.gz) containing only '
-                         'NEW lesions (appearing after first session) with their '
-                         'pre-lesion labels (negative IDs) in prior sessions.')
+    
+    g1 = p.add_argument_group('Group 1: Generic options for maps')
     g1.add_argument('--fill_intermediate_missing', action='store_true',
                     help='Fill missing lesions in intermediate sessions. If a '
                          'lesion exists in session N and N+2 but is missing in '
                          'N+1, copy it from session N (previous session). This '
                          'corrects segmentation errors where lesions were '
                          'accidentally not segmented in intermediate timepoints.')
-    g1.add_argument('--detect_volume_changes', action='store_true',
-                    help='Detect growing (>3mm³), shrinking (>3mm³), and stable '
-                         'lesions by analyzing volume changes across consecutive '
-                         'sessions. Results are included in the CSV report.')
-    g1.add_argument('--volume_change_threshold_mm3', type=float, default=3.0,
-                    help='Volume change threshold in mm³ for classifying lesions '
-                         'as growing or shrinking [%(default)s].')
-    g1.add_argument('--save_volume_change_maps', action='store_true',
+    g1.add_argument('--save_category_maps', action='store_true',
+                    help='Save category maps (*_categories.nii.gz) where each '
+                         'lesion is labeled by its category: 0=undetermined, 1=stable, 2=growing (>20%% increase), '
+                         '3=shrinking (>20%% decrease), 4=new_lesion (appears after baseline), '
+                         '5=confluent (loss of distinct boundaries: merger with ≥3 voxels overlap OR touching <1mm). '
+                         'Priority: growing > confluent > new > stable > shrinking > undetermined. '
+                         'Requires --detect_volume_changes and/or --detect_confluent.')
+
+
+    g2 = p.add_argument_group('Group 2: Lesion evolution across sessions')
+    g2.add_argument('--detect_volume_changes', action='store_true',
+                    help='Detect growing (>20%% volume increase), shrinking (>20%% volume decrease), '
+                         'and stable (<10-15%% change) lesions by analyzing volume changes across '
+                         'consecutive sessions. Results are included in the CSV report.')
+    g2.add_argument('--growing_threshold_percent', type=float, default=20.0,
+                    help='Volume increase threshold (percentage) for classifying lesions '
+                         'as growing [%(default)s].')
+    g2.add_argument('--shrinking_threshold_percent', type=float, default=20.0,
+                    help='Volume decrease threshold (percentage) for classifying lesions '
+                         'as shrinking [%(default)s].')
+    g2.add_argument('--stable_threshold_percent', type=float, default=15.0,
+                    help='Volume change threshold (percentage) for classifying lesions '
+                         'as stable (changes below this are stable) [%(default)s].')
+    g2.add_argument('--save_volume_change_maps', action='store_true',
                     help='Save separate maps for growing (*_growing.nii.gz), '
                          'shrinking (*_shrinking.nii.gz), and stable (*_stable.nii.gz) '
                          'lesions. Requires --detect_volume_changes.')
-    g1.add_argument('--save_category_maps', action='store_true',
-                    help='Save category maps (*_categories.nii.gz) where each '
-                         'lesion is labeled by its category: 0=undetermined, 1=stable, 2=growing (>3mm³ increase), '
-                         '3=shrinking (>4mm³), 4=new_lesion (persists after appearance), '
-                         '5=confluent (merger with small growth ≤3mm³, min 4 voxels overlap), 6=contact. '
-                         'Priority: growing > confluent > new > stable > shrinking > contact > undetermined. '
-                         'Requires --detect_volume_changes and/or --detect_confluent.')
 
-    g2 = p.add_argument_group('Group 2: Detect confluent lesions',
+
+    g3 = p.add_argument_group('Group 3: Detect confluent lesions',
                               'Identify lesions resulting from mergers or contact')
-    g2.add_argument('--detect_confluent', action='store_true',
-                    help='Detect confluent and contact lesions using backwards-mapping. '
-                         'Lesions are classified as CONFLUENT if overlap increases >4 voxels '
-                         'between sessions (merging), or CONTACT if overlap is stable (touching). '
+    g3.add_argument('--detect_confluent', action='store_true',
+                    help='Detect confluent lesions (loss of distinct boundaries). '
+                         'Lesions are classified as CONFLUENT if they have ≥3 voxel overlap '
+                         'with multiple lesions from baseline OR if they touch with distance <1mm. '
                          'Original maps keep their labels; separate *_confluent maps contain only '
-                         'confluent/contact lesions and their sources with original labels. '
+                         'confluent lesions and their sources with original labels. '
                          'Type and overlap evolution are recorded in the CSV report.')
-    g2.add_argument('--min_confluence_overlap', type=int, default=4,
+    g3.add_argument('--min_confluence_overlap', type=int, default=3,
                     help='Minimum number of overlapping voxels to consider a confluence '
                          '[%(default)s].')
+    g3.add_argument('--confluent_distance_mm', type=float, default=1.0,
+                    help='Distance threshold in millimeters for touching lesions to be classified '
+                         'as confluent [%(default)s].')
 
-    g3 = p.add_argument_group('Group 3: Validation of new lesions',
+    g4 = p.add_argument_group('Group 4: New lesions',
                               'Validate spatial constraints for newly appearing lesions')
-    g3.add_argument('--validate_lesion_distance', action='store_true',
+    g4.add_argument('--add_pre_lesion_labels', action='store_true',
+                    help='Add pre-lesion labels for each lesion to all '
+                         'sessions before it appears for the first time. '
+                         'Pre-lesion labels use negative values of the lesion ID.')
+    g4.add_argument('--validate_lesion_distance', action='store_true',
                     help='Validate that each NEW lesion is at least min_distance_mm away '
                          'from any pre-existing lesion at all timepoints prior to '
                          'lesion onset. Lesions violating this constraint are reported.')
-    g3.add_argument('--min_distance_mm', type=float, default=2.0,
+    g4.add_argument('--min_distance_mm', type=float, default=2.0,
                     help='Minimum distance in millimeters required between a new lesion '
                          'and pre-existing lesions [%(default)s].')
-
+    g4.add_argument('--save_new_lesion_map', action='store_true',
+                    help='Save a separate map (*_new_lesions.nii.gz) containing only '
+                         'NEW lesions (appearing after first session) with their '
+                         'pre-lesion labels (negative IDs) in prior sessions.')
 
 
     add_overwrite_arg(p)
@@ -159,16 +388,20 @@ def _build_arg_parser():
 
 
 # -------------------------------------------------------------------------
-# FUNCTION: Detect volume changes (growing, shrinking, stable)
+# FUNCTION: Detect volume changes (growing, shrinking, stable, undetermined)
 # -------------------------------------------------------------------------
-def detect_volume_changes(relabeled_data, affine, threshold_mm3=3.0):
+def detect_volume_changes(relabeled_data, affine, growing_threshold_percent=20.0,
+                          shrinking_threshold_percent=20.0, stable_threshold_percent=12.5):
     """
-    Detect growing, shrinking, and stable lesions based on volume changes.
+    Detect growing, shrinking, stable, and undetermined lesions based on percentage volume changes.
     
     A lesion is classified as:
-    - GROWING: if volume increases by > threshold_mm3 in any consecutive sessions
-    - SHRINKING: if volume decreases by > threshold_mm3 in any consecutive sessions
-    - STABLE: if volume changes are always <= threshold_mm3
+    - GROWING: if volume increases by > growing_threshold_percent between ANY consecutive sessions
+              OR if overall volume increases > growing_threshold_percent from first to last appearance
+    - SHRINKING: if volume decreases by > shrinking_threshold_percent between ANY consecutive sessions
+                OR if overall volume decreases > shrinking_threshold_percent from first to last appearance
+    - STABLE: if all volume changes (consecutive and overall) are <= stable_threshold_percent
+    - UNDETERMINED: if lesion appears at one session and never present after
     
     Parameters
     ----------
@@ -177,17 +410,26 @@ def detect_volume_changes(relabeled_data, affine, threshold_mm3=3.0):
         in chronological order.
     affine : np.ndarray
         4x4 affine transformation matrix for computing volume in mm³.
-    threshold_mm3 : float
-        Volume change threshold in mm³ [default: 3.0].
+    growing_threshold_percent : float
+        Volume increase threshold (percentage) [default: 20.0].
+    shrinking_threshold_percent : float
+        Volume decrease threshold (percentage) [default: 20.0].
+    stable_threshold_percent : float
+        Maximum volume change (percentage) to be classified as stable [default: 12.5].
     
     Returns
     -------
     volume_changes : dict
         Dictionary mapping lesion IDs to volume change information.
-        Format: {lesion_id: {'status': 'growing'|'shrinking'|'stable',
-                             'max_increase_mm3': float,
-                             'max_decrease_mm3': float,
-                             'volume_evolution': [vol1, vol2, ...]}}
+        Format: {lesion_id: {'status': 'growing'|'shrinking'|'stable'|'undetermined',
+                             'max_increase_percent': float,
+                             'max_decrease_percent': float,
+                             'overall_increase_percent': float,
+                             'overall_decrease_percent': float,
+                             'volume_evolution': [vol1, vol2, ...],
+                             'first_appearance': int,
+                             'last_appearance': int,
+                             'session_changes': [(ses_from, ses_to, change_percent, type), ...]}}
     """
     n_sessions = len(relabeled_data)
     voxel_volume = np.abs(np.linalg.det(affine[:3, :3]))
@@ -207,31 +449,81 @@ def detect_volume_changes(relabeled_data, affine, threshold_mm3=3.0):
             volume_mm3 = voxel_count * voxel_volume
             volumes.append(volume_mm3)
         
-        # Calculate changes between consecutive sessions (only when lesion exists)
-        max_increase = 0.0
-        max_decrease = 0.0
+        # Find first and last appearance
+        first_appearance = None
+        last_appearance = None
+        for i, vol in enumerate(volumes):
+            if vol > 0:
+                if first_appearance is None:
+                    first_appearance = i
+                last_appearance = i
+        
+        # Calculate percentage changes between consecutive sessions (only when lesion exists)
+        max_increase_percent = 0.0
+        max_decrease_percent = 0.0
+        
+        # Track session-by-session changes
+        session_changes = []  # List of (session_from, session_to, percent_change, change_type)
         
         for i in range(len(volumes) - 1):
             if volumes[i] > 0 and volumes[i + 1] > 0:
-                change = volumes[i + 1] - volumes[i]
-                if change > max_increase:
-                    max_increase = change
-                if change < max_decrease:
-                    max_decrease = change
+                # Calculate percentage change
+                percent_change = ((volumes[i + 1] - volumes[i]) / volumes[i]) * 100.0
+                
+                if percent_change > max_increase_percent:
+                    max_increase_percent = percent_change
+                if percent_change < max_decrease_percent:
+                    max_decrease_percent = percent_change
+                
+                # Track this change if it's significant (>= 15% in either direction)
+                if percent_change > 15.0:
+                    session_changes.append((i, i + 1, percent_change, 'growing'))
+                elif percent_change < -15.0:
+                    session_changes.append((i, i + 1, abs(percent_change), 'shrinking'))
         
-        # Classify lesion
-        if max_increase > threshold_mm3:
+        # Calculate overall percentage change from first to last appearance
+        overall_increase_percent = 0.0
+        overall_decrease_percent = 0.0
+        
+        if first_appearance is not None and last_appearance is not None and first_appearance < last_appearance:
+            first_vol = volumes[first_appearance]
+            last_vol = volumes[last_appearance]
+            
+            if first_vol > 0:
+                overall_change_percent = ((last_vol - first_vol) / first_vol) * 100.0
+                if overall_change_percent > 0:
+                    overall_increase_percent = overall_change_percent
+                else:
+                    overall_decrease_percent = abs(overall_change_percent)
+        
+        # Classify lesion based on BOTH consecutive AND overall changes
+        # Consider the lesion growing if either consecutive or overall changes exceed threshold
+        max_overall_increase = max(max_increase_percent, overall_increase_percent)
+        max_overall_decrease = max(max_decrease_percent, overall_decrease_percent)
+        
+        if max_overall_increase > growing_threshold_percent:
             status = 'growing'
-        elif abs(max_decrease) > threshold_mm3:
+        elif max_overall_decrease > shrinking_threshold_percent:
             status = 'shrinking'
+        elif first_appearance is not None and first_appearance == last_appearance:
+            # Lesion appears at only one session
+            status = 'undetermined'
+        elif max_overall_increase <= stable_threshold_percent and \
+             max_overall_decrease <= stable_threshold_percent:
+            status = 'stable'
         else:
             status = 'stable'
         
         volume_changes[int(lesion_id)] = {
             'status': status,
-            'max_increase_mm3': max_increase,
-            'max_decrease_mm3': abs(max_decrease),
-            'volume_evolution': volumes
+            'max_increase_percent': max_increase_percent,
+            'max_decrease_percent': abs(max_decrease_percent),
+            'overall_increase_percent': overall_increase_percent,
+            'overall_decrease_percent': overall_decrease_percent,
+            'volume_evolution': volumes,
+            'first_appearance': first_appearance,
+            'last_appearance': last_appearance,
+            'session_changes': session_changes
         }
     
     return volume_changes
@@ -309,30 +601,42 @@ def generate_lesion_report(relabeled_data, output_dir, affine=None, confluent_le
             'Total_Voxels': sum(lesion_data['voxel_counts'])
         }
         
-        # Determine lesion classification
+        # Determine lesion classification - allow multiple categories
         lesion_types = []
         
-        # Check if confluent
-        is_confluent = False
-        if confluent_lesions is not None and lesion_id in confluent_lesions:
-            confluent_info = confluent_lesions[lesion_id]
-            is_confluent = True
-            if confluent_info['type'] == 'confluent':
-                lesion_types.append('confluent')
-            else:
-                lesion_types.append('contact')
-        
-        # Check volume change status
+        # Check volume change status first (order: growing, shrinking, stable, undetermined)
         volume_status = None
         if volume_changes is not None and lesion_id in volume_changes:
             volume_status = volume_changes[lesion_id]['status']
-            lesion_types.append(volume_status)
+            if volume_status != 'undetermined':  # Don't add undetermined to avoid redundancy
+                lesion_types.append(volume_status)
+        
+        # Check if confluent (can be combined with volume status)
+        is_confluent = False
+        if confluent_lesions is not None and lesion_id in confluent_lesions:
+            confluent_info = confluent_lesions[lesion_id]
+            overlap_validation = confluent_info['overlap_validation']
+            # Only mark as confluent if it passed multi-session validation
+            if overlap_validation == 'valid_multi_session':
+                is_confluent = True
+                lesion_types.append('confluent')
+            # Transient/inconsistent confluences are not added to lesion types
+
+        
+        # Check if new lesion (appears after baseline)
+        is_new_lesion = lesion_data['first_session'] is not None and lesion_data['first_session'] > 0
+        if is_new_lesion:
+            lesion_types.append('new')
         
         # Create combined classification
         if lesion_types:
             row['Lesion_Classification'] = '+'.join(lesion_types)
         else:
-            row['Lesion_Classification'] = 'normal'
+            # Default cases
+            if volume_status == 'undetermined':
+                row['Lesion_Classification'] = 'undetermined'
+            else:
+                row['Lesion_Classification'] = 'normal'
         
         # Add individual flags for easy filtering
         row['Is_Growing'] = volume_status == 'growing' if volume_status else False
@@ -344,34 +648,91 @@ def generate_lesion_report(relabeled_data, output_dir, affine=None, confluent_le
         if confluent_lesions is not None:
             if lesion_id in confluent_lesions:
                 confluent_info = confluent_lesions[lesion_id]
+                row['Onset_Session'] = confluent_info['onset_session']
                 row['Merged_From'] = ','.join(map(str, confluent_info['sources']))
-                # Add overlap counts for each source
-                overlap_strings = [f"{src}({confluent_info['overlaps'][src]}v)" for src in confluent_info['sources']]
-                row['Merged_From_Overlaps'] = ','.join(overlap_strings)
+                
+                # Add overlap counts for each source (at onset session)
+                if confluent_info['overlaps']:
+                    overlap_strings = [f"{src}({confluent_info['overlaps'][src]}v)" for src in confluent_info['sources']]
+                    row['Merged_From_Overlaps'] = ','.join(overlap_strings)
+                else:
+                    row['Merged_From_Overlaps'] = ''
                 
                 # Add overlap evolution across sessions
-                overlap_evolution = confluent_info['overlap_evolution']
-                evolution_strings = []
-                for sess_idx in sorted(overlap_evolution.keys()):
-                    sess_overlaps = overlap_evolution[sess_idx]
-                    sess_str = f"S{sess_idx}:" + '+'.join([f"{src}({count})" for src, count in sorted(sess_overlaps.items())])
-                    evolution_strings.append(sess_str)
-                row['Overlap_Evolution'] = '; '.join(evolution_strings)
+                if confluent_info['overlap_evolution']:
+                    overlap_evolution = confluent_info['overlap_evolution']
+                    evolution_strings = []
+                    for sess_idx in sorted(overlap_evolution.keys()):
+                        sess_overlaps = overlap_evolution[sess_idx]
+                        sess_str = f"S{sess_idx}:" + '+'.join([f"{src}({count})" for src, count in sorted(sess_overlaps.items())])
+                        evolution_strings.append(sess_str)
+                    row['Overlap_Evolution'] = '; '.join(evolution_strings)
+                else:
+                    row['Overlap_Evolution'] = ''
+                
+                # Add overlap and distance validation information
+                row['Overlap_Validation_Status'] = confluent_info['overlap_validation']
+                row['Distance_Validation_Status'] = confluent_info['distance_validation']
+                row['Overlap_Persistent'] = confluent_info['overlap_persistent']
+                row['Distance_Persistent'] = confluent_info['distance_persistent']
+                
+                # Add touching lesion distance information (if available)
+                if confluent_info['min_distance_mm'] is not None:
+                    row['Touching_Lesion_Distance_mm'] = confluent_info['min_distance_mm']
+                    row['Touching_Lesion_Session'] = confluent_info['distance_session']
+                else:
+                    row['Touching_Lesion_Distance_mm'] = ''
+                    row['Touching_Lesion_Session'] = ''
+                
+                # Add validation comment explaining confluent status
+                row['Confluent_Validation_Comment'] = confluent_info['validation_comment']
             else:
+                row['Onset_Session'] = ''
                 row['Merged_From'] = ''
                 row['Merged_From_Overlaps'] = ''
                 row['Overlap_Evolution'] = ''
+                row['Overlap_Validation_Status'] = ''
+                row['Distance_Validation_Status'] = ''
+                row['Overlap_Persistent'] = ''
+                row['Distance_Persistent'] = ''
+                row['Touching_Lesion_Distance_mm'] = ''
+                row['Touching_Lesion_Session'] = ''
+                row['Confluent_Validation_Comment'] = ''
         
         # Add volume change information if available
         if volume_changes is not None and lesion_id in volume_changes:
             vol_info = volume_changes[lesion_id]
             row['Volume_Status'] = vol_info['status']
-            row['Max_Increase_mm3'] = vol_info['max_increase_mm3']
-            row['Max_Decrease_mm3'] = vol_info['max_decrease_mm3']
+            
+            # Add consecutive session changes (percentage)
+            row['Max_Consecutive_Increase_Percent'] = vol_info['max_increase_percent']
+            row['Max_Consecutive_Decrease_Percent'] = vol_info['max_decrease_percent']
+            
+            # Add overall changes from first to last appearance (percentage)
+            row['Overall_Increase_Percent'] = vol_info['overall_increase_percent']
+            row['Overall_Decrease_Percent'] = vol_info['overall_decrease_percent']
+            
+            # Add session-by-session changes detail (only changes >= 15%)
+            session_changes = vol_info['session_changes']
+            if session_changes:
+                change_details = []
+                for ses_from, ses_to, change_percent, change_type in session_changes:
+                    change_details.append(f"{change_type}(ses-{ses_from}→{ses_to}:{change_percent:.1f}%)")
+                row['Session_Changes_Detail'] = '; '.join(change_details)
+            else:
+                row['Session_Changes_Detail'] = 'stable'
             
             # Add volume evolution as string
             vol_evolution_str = '; '.join([f"S{i}:{vol:.2f}" for i, vol in enumerate(vol_info['volume_evolution'])])
             row['Volume_Evolution_mm3'] = vol_evolution_str
+            
+            # Add first and last appearance info
+            if vol_info['first_appearance'] is not None:
+                row['First_Appearance_Session'] = vol_info['first_appearance']
+                row['First_Appearance_Volume_mm3'] = vol_info['volume_evolution'][vol_info['first_appearance']]
+            if vol_info['last_appearance'] is not None:
+                row['Last_Appearance_Session'] = vol_info['last_appearance']
+                row['Last_Appearance_Volume_mm3'] = vol_info['volume_evolution'][vol_info['last_appearance']]
             
             # Add individual session volumes
             for session_idx in range(n_sessions):
@@ -568,60 +929,72 @@ def add_pre_lesion_labels(relabeled_data):
 
 
 # -------------------------------------------------------------------------
-# FUNCTION: Detect confluent lesions with overlap analysis
+# FUNCTION: Detect confluent lesions with overlap and distance analysis
 # -------------------------------------------------------------------------
-def detect_confluent_lesions(relabeled_data, min_overlap=4):
+def detect_confluent_lesions(relabeled_data, affine, min_overlap=3, distance_threshold_mm=1.0):
     """
-    Detect confluent and contact lesions using backwards-mapping and overlap evolution.
+    Detect confluent lesions using multi-session consistency validation.
     
-    A lesion is considered:
-    - CONFLUENT: if it overlaps with multiple lesions from first session (min 4 voxels each) AND 
-                 overlap increases by >4 voxels between sessions (merging)
-    - CONTACT: if it overlaps with multiple lesions from first session BUT
-               overlap remains stable (just touching, not merging)
+    Confluence detection with persistence validation:
+    1. IDENTIFY ONSET SESSION: Find session N where lesion overlaps with ≥2 sources 
+       from baseline with ≥min_overlap voxels per source
+    2. VALIDATE PRE-ONSET: Verify that overlap is <min_overlap in all sessions BEFORE N
+    3. VALIDATE POST-ONSET: Verify that overlap persists ≥min_overlap in ALL sessions AFTER N
+    4. MULTI-SESSION REQUIREMENT: Confluence must span ≥2 sessions (not a single-session artifact)
+    5. DISTANCE VALIDATION: For valid overlaps, verify touching distance < distance_threshold_mm
+       persists in sessions following onset (same persistence requirement)
     
-    Uses backwards-mapping: for each lesion in session N, check if its footprint
-    overlaps with multiple lesions in session 1, then analyze overlap evolution.
+    Confluent lesions represent persistent loss of distinct boundaries across multiple sessions.
     
     Parameters
     ----------
     relabeled_data : list of np.ndarray
         List of 3D label arrays (same shape), one per session,
         in chronological order.
+    affine : np.ndarray
+        4x4 affine transformation matrix for converting voxel coordinates
+        to physical space (mm).
     min_overlap : int
-        Minimum number of overlapping voxels to consider a merge [default: 4].
+        Minimum number of overlapping voxels to consider a confluence [default: 3].
+    distance_threshold_mm : float
+        Distance threshold in millimeters for touching lesions [default: 1.0].
     
     Returns
     -------
     confluent_lesions : dict
-        Dictionary mapping lesion IDs to info about confluent lesions.
-        Format: {lesion_id: {'sources': [source_id1, source_id2, ...],
-                             'overlaps': {source_id1: voxel_count1, ...},
-                             'type': 'confluent' or 'contact',
-                             'overlap_evolution': {session_idx: {source_id: count, ...}, ...}}}
+        Dictionary mapping lesion IDs to confluent lesion information.
+        Format: {lesion_id: {
+                    'sources': [source_id1, source_id2, ...],
+                    'onset_session': int (session where confluence first appears),
+                    'overlaps': {source_id1: voxel_count1, ...} (at onset session),
+                    'overlap_evolution': {session_idx: {source_id: count, ...}, ...},
+                    'overlap_persistent': bool (persists in all post-onset sessions),
+                    'overlap_validation': str (valid_multi_session | invalid_transient | invalid_inconsistent),
+                    'min_distance_mm': float or None,
+                    'distance_session': int or None,
+                    'distance_persistent': bool,
+                    'distance_validation': str (valid | N/A_no_touching | invalid),
+                    'validation_comment': str (explanation of validation status)
+                }}
     """
     if len(relabeled_data) < 2:
         return {}
     
     confluent_lesions = {}
-    
-    # Get first session data
     first_session = relabeled_data[0]
+    n_sessions = len(relabeled_data)
     
-    # For each subsequent session, check for merges
-    for session_idx in range(1, len(relabeled_data)):
+    # STEP 1: IDENTIFY POTENTIAL CONFLUENT LESIONS (onset detection)
+    # Find lesions that overlap with multiple sources from baseline
+    potential_confluencies = {}  # {lesion_id: [(session_idx, sources_dict), ...]}
+    
+    for session_idx in range(1, n_sessions):
         current_session = relabeled_data[session_idx]
-        
-        # Get all positive lesion IDs in current session
         current_labels = np.unique(current_session)
         current_labels = current_labels[current_labels > 0]
         
-        # For each lesion in current session
         for lesion_id in current_labels:
-            # Get the footprint of this lesion
             lesion_mask = (current_session == lesion_id)
-            
-            # Check which lesions from first session overlap with this footprint
             overlapping_first_session = first_session[lesion_mask]
             overlapping_labels = np.unique(overlapping_first_session)
             overlapping_labels = overlapping_labels[overlapping_labels > 0]
@@ -633,51 +1006,176 @@ def detect_confluent_lesions(relabeled_data, min_overlap=4):
                 if count >= min_overlap:
                     overlap_counts[int(overlap_label)] = count
             
-            # If this lesion overlaps with multiple lesions from first session
-            if len(overlap_counts) > 1:
-                # Track overlap evolution across all sessions
-                overlap_evolution = {}
+            # Record if overlaps with multiple sources
+            if len(overlap_counts) >= 2:
+                if int(lesion_id) not in potential_confluencies:
+                    potential_confluencies[int(lesion_id)] = []
+                potential_confluencies[int(lesion_id)].append((session_idx, overlap_counts))
+    
+    # STEP 2: VALIDATE PERSISTENCE AND ASSIGN FINAL STATUS
+    for lesion_id, onset_sessions in potential_confluencies.items():
+        # Sort by session to find true onset (first appearance of confluence)
+        onset_sessions.sort(key=lambda x: x[0])
+        onset_session, onset_overlaps = onset_sessions[0]
+        
+        # Build complete overlap evolution for this lesion
+        overlap_evolution = {}
+        for sess_idx in range(n_sessions):
+            sess_data = relabeled_data[sess_idx]
+            
+            if not np.any(sess_data == lesion_id):
+                continue
+            
+            lesion_mask_sess = (sess_data == lesion_id)
+            first_sess_view = first_session[lesion_mask_sess]
+            
+            sess_overlaps = {}
+            for overlap_label in onset_overlaps.keys():
+                count = np.sum(first_sess_view == overlap_label)
+                if count > 0:
+                    sess_overlaps[overlap_label] = count
+            
+            if sess_overlaps:
+                overlap_evolution[sess_idx] = sess_overlaps
+        
+        # VALIDATE PRE-ONSET: Check sessions before onset
+        pre_onset_valid = True
+        pre_onset_issues = []
+        for pre_session in range(onset_session):
+            if pre_session in overlap_evolution:
+                for source_id, count in overlap_evolution[pre_session].items():
+                    if count >= min_overlap:
+                        pre_onset_valid = False
+                        pre_onset_issues.append(f"ses-{pre_session}: source {source_id} has {count} voxels (expected <{min_overlap})")
+        
+        # VALIDATE POST-ONSET: Check sessions after onset
+        post_onset_valid = True
+        post_onset_issues = []
+        post_onset_sessions_with_valid_overlap = 0
+        
+        for post_session in range(onset_session + 1, n_sessions):
+            # Check if lesion exists in this session
+            if post_session not in overlap_evolution:
+                post_onset_valid = False
+                post_onset_issues.append(f"ses-{post_session}: lesion does not exist")
+                continue
+            
+            # Check if overlap persists
+            post_overlaps = overlap_evolution[post_session]
+            all_sources_present = all(
+                source_id in post_overlaps and post_overlaps[source_id] >= min_overlap
+                for source_id in onset_overlaps.keys()
+            )
+            
+            if all_sources_present:
+                post_onset_sessions_with_valid_overlap += 1
+            else:
+                post_onset_valid = False
+                missing = [src for src in onset_overlaps.keys() 
+                          if src not in post_overlaps or post_overlaps[src] < min_overlap]
+                post_onset_issues.append(f"ses-{post_session}: sources {missing} have insufficient overlap (<{min_overlap})")
+        
+        # MULTI-SESSION REQUIREMENT: Must span at least 2 sessions with valid overlap
+        multi_session_valid = (1 + post_onset_sessions_with_valid_overlap) >= 2
+        
+        # Determine overall overlap validation status
+        if not pre_onset_valid:
+            overlap_validation = 'invalid_inconsistent'
+            overlap_comment = f"Pre-onset overlap detected. Issues: {'; '.join(pre_onset_issues[:2])}"
+        elif len(onset_sessions) == 1 and not post_onset_valid:
+            # Overlap only at onset session (transient)
+            overlap_validation = 'invalid_transient'
+            overlap_comment = f"Single-session confluence (may be segmentation artifact). No persistence in post-onset sessions."
+        elif not multi_session_valid:
+            overlap_validation = 'invalid_transient'
+            overlap_comment = f"Confluence spans <2 sessions. Only {1 + post_onset_sessions_with_valid_overlap} session(s) with valid overlap."
+        elif post_onset_valid:
+            overlap_validation = 'valid_multi_session'
+            overlap_comment = f"Valid multi-session confluence (onset ses-{onset_session}, spans {1 + post_onset_sessions_with_valid_overlap} sessions)."
+        else:
+            overlap_validation = 'invalid_inconsistent'
+            overlap_comment = f"Overlap inconsistent post-onset. Issues: {'; '.join(post_onset_issues[:2])}"
+        
+        # STEP 3: DISTANCE VALIDATION (only for valid overlaps)
+        min_distance_overall = None
+        distance_session = None
+        distance_persistent = False
+        distance_validation = 'N/A_no_touching'
+        
+        if overlap_validation == 'valid_multi_session':
+            # Check distance for sessions after onset where overlap is valid
+            distance_sessions_checked = 0
+            distance_sessions_touching = 0
+            
+            for check_session in range(onset_session, n_sessions):
+                if check_session not in overlap_evolution:
+                    continue
                 
-                for sess_idx in range(len(relabeled_data)):
-                    sess_data = relabeled_data[sess_idx]
+                current_session = relabeled_data[check_session]
+                
+                if not np.any(current_session == lesion_id):
+                    continue
+                
+                coords_1 = np.where(current_session == lesion_id)
+                lesion_1_coords = np.array([coords_1[0], coords_1[1], coords_1[2]]).T
+                
+                other_labels = np.unique(current_session[current_session > 0])
+                other_labels = other_labels[other_labels != lesion_id]
+                
+                for other_lesion_id in other_labels:
+                    # Only check distance to source lesions
+                    if int(other_lesion_id) not in onset_overlaps.keys():
+                        continue
                     
-                    # Check if this lesion exists in this session
-                    if np.any(sess_data == lesion_id):
-                        lesion_mask_sess = (sess_data == lesion_id)
-                        first_sess_view = first_session[lesion_mask_sess]
-                        
-                        sess_overlaps = {}
-                        for overlap_label in overlap_counts.keys():
-                            count = np.sum(first_sess_view == overlap_label)
-                            if count > 0:
-                                sess_overlaps[overlap_label] = count
-                        
-                        if sess_overlaps:
-                            overlap_evolution[sess_idx] = sess_overlaps
-                
-                # Determine if confluent (merging) or contact (just touching)
-                lesion_type = 'contact'  # Default to contact
-                
-                # Check if overlap increases by more than 4 voxels between any consecutive sessions
-                session_indices = sorted(overlap_evolution.keys())
-                for i in range(len(session_indices) - 1):
-                    curr_sess = session_indices[i]
-                    next_sess = session_indices[i + 1]
+                    coords_2 = np.where(current_session == other_lesion_id)
+                    if len(coords_2[0]) == 0:
+                        continue
                     
-                    # Calculate total overlap for each session
-                    curr_total = sum(overlap_evolution[curr_sess].values())
-                    next_total = sum(overlap_evolution[next_sess].values())
+                    lesion_2_coords = np.array([coords_2[0], coords_2[1], coords_2[2]]).T
                     
-                    if next_total - curr_total > 4:
-                        lesion_type = 'confluent'
-                        break
-                
-                confluent_lesions[int(lesion_id)] = {
-                    'sources': sorted(overlap_counts.keys()),
-                    'overlaps': overlap_counts,
-                    'type': lesion_type,
-                    'overlap_evolution': overlap_evolution
-                }
+                    distances = cdist(lesion_1_coords, lesion_2_coords, metric='euclidean')
+                    min_distance_voxels = np.min(distances)
+                    
+                    voxel_spacing = np.array([affine[0, 0], affine[1, 1], affine[2, 2]])
+                    voxel_spacing = np.abs(voxel_spacing)
+                    avg_voxel_spacing = np.mean(voxel_spacing)
+                    min_distance_mm = min_distance_voxels * avg_voxel_spacing
+                    
+                    # Track minimum distance
+                    if min_distance_overall is None or min_distance_mm < min_distance_overall:
+                        min_distance_overall = min_distance_mm
+                        distance_session = check_session
+                    
+                    # Count touching sessions
+                    if min_distance_mm < distance_threshold_mm:
+                        distance_sessions_touching += 1
+                    
+                    distance_sessions_checked += 1
+            
+            # Determine distance validation
+            if distance_sessions_checked == 0:
+                distance_validation = 'N/A_no_touching'
+            elif distance_sessions_touching == distance_sessions_checked and distance_sessions_checked > 0:
+                distance_persistent = True
+                distance_validation = 'valid'
+            else:
+                distance_persistent = False
+                distance_validation = 'invalid' if distance_sessions_checked > 0 else 'N/A_no_touching'
+        
+        # Store final confluent lesion information
+        confluent_lesions[lesion_id] = {
+            'sources': sorted(onset_overlaps.keys()),
+            'onset_session': onset_session,
+            'overlaps': onset_overlaps,
+            'overlap_evolution': overlap_evolution,
+            'overlap_persistent': post_onset_valid,
+            'overlap_validation': overlap_validation,
+            'min_distance_mm': min_distance_overall,
+            'distance_session': distance_session,
+            'distance_persistent': distance_persistent,
+            'distance_validation': distance_validation,
+            'validation_comment': overlap_comment
+        }
     
     return confluent_lesions
 
@@ -924,25 +1422,22 @@ def create_category_maps(relabeled_data, volume_changes=None, confluent_lesions=
     Create maps where each lesion is labeled by its category.
     
     Categories:
-    - 0: undetermined (doesn't fit any category)
-    - 1: stable lesion (volume changes ≤3 mm³)
-    - 2: growing lesion (volume increases >3 mm³ between consecutive sessions)
-    - 3: shrinking lesion (volume decreases >4 mm³)
-    - 4: new lesion (first appears after session 0, persists in subsequent sessions)
-    - 5: confluent lesion (merging with small growth ≤3mm³, min 4 voxels overlap)
-    - 6: contact lesion (touching)
+    - 0: undetermined (lesion appears once and never after)
+    - 1: stable lesion (volume changes < 10-15%)
+    - 2: growing lesion (volume increases > 20% between consecutive sessions)
+    - 3: shrinking lesion (volume decreases > 20%)
+    - 4: new lesion (first appears after session 0)
+    - 5: confluent lesion (loss of distinct boundaries: ≥3 voxel overlap OR touching <1mm)
     
     Priority system:
-    - Growing (2) has highest priority: requires >3mm³ increase in at least 2 consecutive
-      sessions OR continuous volume increase across multiple sessions
-    - Confluent (5) applies when 2+ lesions merge with small growth (≤3mm³)
-    - New (4) is important - must persist in all subsequent sessions after appearance
+    - Growing (2) has highest priority: requires >20% increase in at least one session
+    - Confluent (5) applies when lesions merge or touch
+    - New (4) is important - appears after baseline
     - Stable (1) for lesions without significant changes
-    - Shrinking (3) only if volume decreases >4 mm³
-    - Contact (6) lowest priority
-    - Undetermined (0) for lesions that don't fit any category
+    - Shrinking (3) for lesions that decrease >20%
+    - Undetermined (0) for lesions that appear at only one session
     
-    Priority order: Growing > Confluent > New > Stable > Shrinking > Contact > Undetermined
+    Priority order: Growing > Confluent > New > Stable > Shrinking > Undetermined
     
     Parameters
     ----------
@@ -986,127 +1481,62 @@ def create_category_maps(relabeled_data, volume_changes=None, confluent_lesions=
         category = 0  # Default: undetermined
         category_assigned = False
         
-        # Check if new lesion and validate persistence
+        # Determine if new lesion (appears after baseline)
         is_new_lesion = False
         if lesion_first_appearance[lesion_id] is not None and lesion_first_appearance[lesion_id] > 0:
+            is_new_lesion = True
+        
+        # Determine if undetermined (appears once and never after)
+        is_undetermined = False
+        if lesion_first_appearance[lesion_id] is not None:
             first_session = lesion_first_appearance[lesion_id]
-            # Check if lesion persists in all subsequent sessions
-            persists = True
+            last_session = first_session
             for session_idx in range(first_session + 1, n_sessions):
-                if lesion_id not in relabeled_data[session_idx]:
-                    persists = False
-                    break
+                if lesion_id in relabeled_data[session_idx]:
+                    last_session = session_idx
             
-            if persists:
-                is_new_lesion = True
-                category = 4  # New lesion (important priority)
+            if first_session == last_session:
+                is_undetermined = True
+                category = 0  # Undetermined
                 category_assigned = True
-        is_growing_extended = False
+        
+        # Check volume changes
+        is_growing = False
+        is_shrinking = False
+        is_stable = False
+        
         if volume_changes is not None and lesion_id in volume_changes:
-            status = volume_changes[lesion_id]['status']
-            max_decrease = volume_changes[lesion_id]['max_decrease_mm3']
-            max_increase = volume_changes[lesion_id]['max_increase_mm3']
+            vol_info = volume_changes[lesion_id]
+            status = vol_info['status']
+            max_increase_percent = vol_info['max_increase_percent']
+            max_decrease_percent = vol_info['max_decrease_percent']
             
-            # Check if growing: need >3mm³ increase between consecutive sessions
-            if status == 'growing' and max_increase > 3.0:
-                volumes = volume_changes[lesion_id]['volume_evolution']
-                
-                # Check for at least 2 consecutive sessions with significant increase (>3mm³)
-                consecutive_growth = 0
-                has_consecutive_growth = False
-                for i in range(len(volumes) - 1):
-                    if volumes[i] > 0 and volumes[i + 1] > 0:
-                        change = volumes[i + 1] - volumes[i]
-                        if change > 3.0:
-                            consecutive_growth += 1
-                            if consecutive_growth >= 2:
-                                has_consecutive_growth = True
-                                break
-                        else:
-                            consecutive_growth = 0
-                
-                # Alternative: check for continuous volume increase across sessions
-                # (e.g., ses-0 to ses-3, ses-0 to ses-5, etc.)
-                has_continuous_growth = False
-                if not has_consecutive_growth:
-                    # Find first non-zero volume
-                    first_volume_idx = None
-                    for i, vol in enumerate(volumes):
-                        if vol > 0:
-                            first_volume_idx = i
-                            break
-                    
-                    if first_volume_idx is not None:
-                        first_volume = volumes[first_volume_idx]
-                        # Check if volume increases across multiple sessions
-                        increasing_count = 0
-                        for i in range(first_volume_idx + 1, len(volumes)):
-                            if volumes[i] > 0 and volumes[i] > first_volume:
-                                increasing_count += 1
-                        
-                        # If volume increases in at least 2 later sessions
-                        if increasing_count >= 2:
-                            has_continuous_growth = True
-                
-                if has_consecutive_growth or has_continuous_growth:
-                    is_growing_extended = True
-                    category = 2  # Growing has highest priority
-                    category_assigned = True
-            elif status == 'shrinking' and max_decrease > 4.0:
-                # Shrinking only if decrease is significant (>4 mm³)
-                # But lower priority than new/stable/confluent
+            if status == 'growing':
+                is_growing = True
+                category = 2  # Growing has highest priority
+                category_assigned = True
+            elif status == 'shrinking':
+                is_shrinking = True
                 if not category_assigned or category == 0:
                     category = 3
                     category_assigned = True
-            elif status == 'stable':
+            elif status == 'stable' and not is_undetermined:
+                is_stable = True
                 if not category_assigned or category == 0:
-                    category = 1  # Stable
+                    category = 1
                     category_assigned = True
         
-        # Check confluent status (only if not growing for >2 sessions)
-        if not is_growing_extended and confluent_lesions is not None and lesion_id in confluent_lesions:
+        # Check confluent status (only if not growing)
+        if not is_growing and confluent_lesions is not None and lesion_id in confluent_lesions:
             confluent_info = confluent_lesions[lesion_id]
-            confluent_type = confluent_info['type']
-            
-            # Confluent only if it's truly merging with small growth (≤3mm³)
-            if confluent_type == 'confluent':
-                # Confluent = fusion of 2 existing lesions that may grow a little (≤3mm³)
-                if volume_changes is not None and lesion_id in volume_changes:
-                    max_increase = volume_changes[lesion_id]['max_increase_mm3']
-                    volumes = volume_changes[lesion_id]['volume_evolution']
-                    overlap_evolution = confluent_info['overlap_evolution']
-                    
-                    # Find the merger session (when overlap first appears with multiple sources)
-                    merger_session = min(overlap_evolution.keys()) if overlap_evolution else None
-                    
-                    if merger_session is not None and merger_session < len(volumes) - 1:
-                        # Check post-merger volume changes
-                        post_merger_changes = []
-                        for i in range(merger_session, len(volumes) - 1):
-                            if volumes[i] > 0 and volumes[i + 1] > 0:
-                                change = abs(volumes[i + 1] - volumes[i])
-                                post_merger_changes.append(change)
-                        
-                        # Confluent: small growth after merger (≤3mm³)
-                        # If growth is >3mm³, it should be classified as growing instead
-                        if not post_merger_changes or max(post_merger_changes) <= 3.0:
-                            # Confluent doesn't override new lesions or growing
-                            if not is_new_lesion and not is_growing_extended:
-                                category = 5
-                                category_assigned = True
-                    else:
-                        if not is_new_lesion and not is_growing_extended:
-                            category = 5
-                            category_assigned = True
-                else:
-                    if not is_new_lesion and not is_growing_extended:
-                        category = 5
-                        category_assigned = True
-            elif confluent_type == 'contact':
-                # Contact has lowest priority
-                if not category_assigned or category == 0:
-                    category = 6
-                    category_assigned = True
+            # Confluent (type can be 'confluent_overlap' or 'confluent_distance')
+            category = 5
+            category_assigned = True
+        
+        # Check new lesion status (lower priority than confluent)
+        if not is_growing and not category_assigned and is_new_lesion and not is_undetermined:
+            category = 4  # New lesion
+            category_assigned = True
         
         # Apply category to all sessions where lesion exists
         for session_idx in range(n_sessions):
@@ -1153,35 +1583,51 @@ def main():
     confluent_lesions = None
     confluent_maps = None
     if args.detect_confluent:
-        print("Detecting confluent lesions using backwards-mapping...")
-        confluent_lesions = detect_confluent_lesions(data, 
-                                                     args.min_confluence_overlap)
+        print("Detecting confluent lesions using overlap and distance analysis...")
+        confluent_lesions = detect_confluent_lesions(data, affine,
+                                                     args.min_confluence_overlap,
+                                                     args.confluent_distance_mm)
         if confluent_lesions:
-            # Separate by type
-            confluent_count = sum(1 for info in confluent_lesions.values() if info['type'] == 'confluent')
-            contact_count = sum(1 for info in confluent_lesions.values() if info['type'] == 'contact')
+            confluent_count = len(confluent_lesions)
             
-            print(f"Found {len(confluent_lesions)} lesion(s) with multiple sources:")
-            print(f"  - {confluent_count} confluent (merging)")
-            print(f"  - {contact_count} contact (touching)")
+            print(f"Found {confluent_count} confluent lesion(s):")
             print()
             
             for lesion_id, info in confluent_lesions.items():
+                overlap_validation = info['overlap_validation']
+                distance_validation = info['distance_validation']
+                onset_session = info['onset_session']
                 sources = info['sources']
                 overlaps = info['overlaps']
-                lesion_type = info['type'].upper()
                 overlap_str = ', '.join([f"{src} ({overlaps[src]} voxels)" for src in sources])
                 
-                print(f"  Lesion {lesion_id} [{lesion_type}] - sources: {overlap_str}")
+                print(f"  Lesion {lesion_id} - Onset: Session {onset_session}")
+                print(f"    Overlap validation: {overlap_validation} - sources: {overlap_str}")
+                
+                # Show overlap validation status
+                if overlap_validation == 'valid_multi_session':
+                    print(f"    Valid multi-session confluence")
+                elif overlap_validation == 'invalid_transient':
+                    print(f"    Invalid: Single-session or transient overlap (may be segmentation artifact)")
+                elif overlap_validation == 'invalid_inconsistent':
+                    print(f"    Invalid: Inconsistent overlap pattern")
                 
                 # Show overlap evolution
                 overlap_evolution = info['overlap_evolution']
-                print("    -> Overlap evolution:")
-                for sess_idx in sorted(overlap_evolution.keys()):
-                    sess_overlaps = overlap_evolution[sess_idx]
-                    total = sum(sess_overlaps.values())
-                    detail = ', '.join([f"{src}({count})" for src, count in sorted(sess_overlaps.items())])
-                    print(f"       Session {sess_idx}: {total} voxels total ({detail})")
+                if overlap_evolution:
+                    print("    Overlap evolution:")
+                    for sess_idx in sorted(overlap_evolution.keys()):
+                        sess_overlaps = overlap_evolution[sess_idx]
+                        total = sum(sess_overlaps.values())
+                        detail = ', '.join([f"{src}({count})" for src, count in sorted(sess_overlaps.items())])
+                        print(f"      Session {sess_idx}: {total} voxels total ({detail})")
+                
+                # Show distance information if available
+                if info['min_distance_mm'] is not None:
+                    min_dist = info['min_distance_mm']
+                    dist_sess = info['distance_session']
+                    print(f"    Distance validation: {distance_validation} (min: {min_dist:.2f} mm at session {dist_sess})")
+                
                 print()
             
             print("Creating separate confluent lesion maps...")
@@ -1199,18 +1645,26 @@ def main():
     shrinking_maps = None
     stable_maps = None
     if args.detect_volume_changes:
-        print(f"Detecting volume changes (threshold: {args.volume_change_threshold_mm3} mm³)...")
-        volume_changes = detect_volume_changes(data, affine, args.volume_change_threshold_mm3)
+        print(f"Detecting volume changes...")
+        print(f"  Growing threshold: {args.growing_threshold_percent}%")
+        print(f"  Shrinking threshold: {args.shrinking_threshold_percent}%")
+        print(f"  Stable threshold: {args.stable_threshold_percent}%")
+        volume_changes = detect_volume_changes(data, affine, 
+                                               args.growing_threshold_percent,
+                                               args.shrinking_threshold_percent,
+                                               args.stable_threshold_percent)
         
         # Count lesions by status
         growing = sum(1 for info in volume_changes.values() if info['status'] == 'growing')
         shrinking = sum(1 for info in volume_changes.values() if info['status'] == 'shrinking')
         stable = sum(1 for info in volume_changes.values() if info['status'] == 'stable')
+        undetermined = sum(1 for info in volume_changes.values() if info['status'] == 'undetermined')
         
         print(f"Volume change analysis:")
-        print(f"  - {growing} growing lesion(s)")
-        print(f"  - {shrinking} shrinking lesion(s)")
-        print(f"  - {stable} stable lesion(s)")
+        print(f"  - {growing} growing lesion(s) (>%{args.growing_threshold_percent} increase)")
+        print(f"  - {shrinking} shrinking lesion(s) (>%{args.shrinking_threshold_percent} decrease)")
+        print(f"  - {stable} stable lesion(s) (<%{args.stable_threshold_percent} change)")
+        print(f"  - {undetermined} undetermined lesion(s) (appear once, never after)")
         
         # Create volume change maps if requested
         if args.save_volume_change_maps:
@@ -1310,9 +1764,9 @@ def main():
     print("Generating lesion report CSV...")
     csv_path = generate_lesion_report(data, args.out_dir, affine, confluent_lesions, volume_changes)
     print(f"Lesion report saved to: {csv_path}")
-    
-    print("Done!")
 
 
 if __name__ == "__main__":
     main()
+
+
