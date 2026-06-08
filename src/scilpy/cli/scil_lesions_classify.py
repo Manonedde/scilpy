@@ -3,6 +3,18 @@
 """
 Classify lesions based on their spatial relationship with tissue masks.
 
+Notes : Masks can be freesurfer outputs or any other segmentation of the brain into WM-GM-CSF. 
+Just be careful with the presence of lesions in the tissue masks, 
+if they are not masked out, it can affect the classification (flirt for example class lesions in GM tissue).
+
+************************************************************************************************
+WARNING : It's just a draft, percentage or other should be improve with experiences + visual QC.
+The prriority order of the classification can be modified depending on the relevance 
+of each class in the context of the study. 
+The default is confluent > periventricular > juxtacortical > white matter, 
+but this can be changed by modifying the classification logic in the code.
+**************************************************************************************************
+
 This script takes a labeled lesion image (where each lesion has a unique
 integer label) and tissue masks (white matter, grey matter, and CSF) to
 classify each lesion into one of the following categories:
@@ -181,7 +193,10 @@ def classify_lesion(lesion_mask, wm_mask, gm_mask, csf_mask,
         'csf_percentage': csf_pct * 100
     }
     
-    # Classification logic (priority order)
+    # Classification logic 
+    # priority order, maybe must be modifying this order if we want to change the priority
+    # depending on the relevance of each class
+    # default is confluent > periventricular > juxtacortical > white matter
     
     # 1. Check for confluent lesion
     if (wm_pct > wm_thresh and csf_pct > csf_thresh and gm_pct > gm_thresh):
